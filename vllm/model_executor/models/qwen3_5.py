@@ -445,8 +445,13 @@ class Qwen3_5ForCausalLMBase(
         ],
         "gate_up_proj": ["gate_proj", "up_proj"],
         # GDN fused projections.
-        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_qkvz": ["in_proj_q", "in_proj_k", "in_proj_v", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
+    }
+
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -556,8 +561,13 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     supports_multimodal_pruning = False
 
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
-        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_qkvz": ["in_proj_q", "in_proj_k", "in_proj_v", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
+    }
+
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
