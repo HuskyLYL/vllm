@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -12,11 +13,20 @@ from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 
+if TYPE_CHECKING:
+    from vllm.lora.punica_wrapper import PunicaWrapperBase
+
 
 class PromptLogprobsWorker:
-    def __init__(self, max_num_reqs: int, logprobs_mode: LogprobsMode = "raw_logprobs"):
+    def __init__(
+        self,
+        max_num_reqs: int,
+        logprobs_mode: LogprobsMode = "raw_logprobs",
+        lora_wrapper: "PunicaWrapperBase | None" = None,
+    ):
         self.max_num_reqs = max_num_reqs
         self.logprobs_mode = logprobs_mode
+        self.lora_wrapper = lora_wrapper
 
         self.uses_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
         self.num_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=np.int32)
@@ -85,6 +95,7 @@ class PromptLogprobsWorker:
                 logits_fn,
                 max_num_prompt_logprobs,
                 self.logprobs_mode,
+                self.lora_wrapper,
             )
         )
 
@@ -202,6 +213,7 @@ def compute_prompt_logprobs_with_chunking(
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
     num_prompt_logprobs: int,
     logprobs_mode: LogprobsMode = "raw_logprobs",
+    lora_wrapper: "PunicaWrapperBase | None" = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
@@ -213,8 +225,13 @@ def compute_prompt_logprobs_with_chunking(
     prompt_token_ids = prompt_token_ids.to(torch.int64)
     for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
         end_idx = start_idx + CHUNK_SIZE
+        token_slice = slice(start_idx, end_idx)
         # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
-        prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
+        if lora_wrapper is None:
+            prompt_logits = logits_fn(prompt_hidden_states[token_slice])
+        else:
+            with lora_wrapper.use_token_mapping_for_logits(token_slice):
+                prompt_logits = logits_fn(prompt_hidden_states[token_slice])
         requested_num = (
             prompt_logits.shape[-1]
             if num_prompt_logprobs == -1
@@ -223,7 +240,7 @@ def compute_prompt_logprobs_with_chunking(
         result = compute_topk_scores(
             prompt_logits,
             requested_num,
-            prompt_token_ids[start_idx:end_idx],
+            prompt_token_ids[token_slice],
             logits_mode=logits_mode,
         )
         token_ids.append(result.logprob_token_ids)

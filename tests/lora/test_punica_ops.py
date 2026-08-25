@@ -418,6 +418,94 @@ DEVICES = [f"{DEVICE_TYPE}:{0}"]
 SEED = [0]
 
 
+def _make_logits_mapping_wrapper(device: str):
+    from types import SimpleNamespace
+
+    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
+
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    wrapper = PunicaWrapperGPU(
+        max_num_batched_tokens=6,
+        max_batches=3,
+        device=device,
+        lora_config=SimpleNamespace(
+            max_loras=4,
+            specialize_active_lora=False,
+        ),
+    )
+    wrapper.update_metadata(
+        LoRAMapping(
+            index_mapping=(1, 2, 1, 3, 3, 2),
+            prompt_mapping=(1, 2, 3),
+            is_prefill=True,
+        ),
+        lora_index_to_id=[1, 2, 3, None],
+        max_loras=5,
+        vocab_size=16,
+    )
+    return wrapper
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lora_logits_mapping_reuses_full_token_metadata(device: str):
+    wrapper = _make_logits_mapping_wrapper(device)
+    original_mapping_meta = wrapper.prompt_mapping_meta
+
+    with wrapper.use_token_mapping_for_logits(slice(0, 1024)):
+        assert wrapper.prompt_mapping_meta is wrapper.token_mapping_meta
+
+    assert wrapper.prompt_mapping_meta is original_mapping_meta
+    assert wrapper._logits_mapping_meta is None
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lora_logits_mapping_builds_chunk_local_metadata(device: str):
+    wrapper = _make_logits_mapping_wrapper(device)
+    original_mapping_meta = wrapper.prompt_mapping_meta
+
+    with wrapper.use_token_mapping_for_logits(slice(1, 5)):
+        mapping_meta = wrapper.prompt_mapping_meta
+        assert mapping_meta.token_lora_mapping[:4].tolist() == [1, 0, 2, 2]
+        assert mapping_meta.token_indices_sorted_by_lora_ids[:4].tolist() == [
+            1,
+            0,
+            2,
+            3,
+        ]
+        assert mapping_meta.active_lora_ids[:3].tolist() == [0, 1, 2]
+        assert mapping_meta.num_tokens_per_lora[:3].tolist() == [1, 1, 2]
+        assert mapping_meta.lora_token_start_loc[:4].tolist() == [0, 1, 2, 4]
+
+    assert wrapper.prompt_mapping_meta is original_mapping_meta
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lora_logits_mapping_reuses_chunk_metadata(device: str):
+    wrapper = _make_logits_mapping_wrapper(device)
+
+    with wrapper.use_token_mapping_for_logits(slice(1, 5)):
+        mapping_meta = wrapper.prompt_mapping_meta
+
+    with wrapper.use_token_mapping_for_logits(slice(0, 2)):
+        assert wrapper.prompt_mapping_meta is mapping_meta
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lora_logits_mapping_restores_metadata_on_error(device: str):
+    wrapper = _make_logits_mapping_wrapper(device)
+    original_mapping_meta = wrapper.prompt_mapping_meta
+
+    with (
+        pytest.raises(RuntimeError, match="logits failed"),
+        wrapper.use_token_mapping_for_logits(slice(1, 5)),
+    ):
+        raise RuntimeError("logits failed")
+
+    assert wrapper.prompt_mapping_meta is original_mapping_meta
+
+
 @pytest.mark.parametrize("batches", test_params["batches"])
 @pytest.mark.parametrize("num_loras", test_params["num_loras"])
 @pytest.mark.parametrize("rank", test_params["max_ranks"])
