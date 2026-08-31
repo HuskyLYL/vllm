@@ -224,13 +224,8 @@ def compute_prompt_logprobs_with_chunking(
     ranks = []
     logits_mode = logprobs_mode in ("raw_logits", "processed_logits")
     prompt_token_ids = prompt_token_ids.to(torch.int64)
-    prompt_mapping_meta = (
-        getattr(lora_wrapper, "prompt_mapping_meta", None)
-        if lora_wrapper is not None
-        else None
-    )
-    if prompt_mapping_meta is not None:
-        assert lora_wrapper is not None
+    if lora_wrapper is not None:
+        prompt_mapping_meta = lora_wrapper.prompt_mapping_meta
         token_lora_indices = lora_wrapper.token_lora_indices
         original_sampler_indices = lora_wrapper.sampler_indices.clone()
     else:
@@ -241,15 +236,13 @@ def compute_prompt_logprobs_with_chunking(
             end_idx = start_idx + CHUNK_SIZE
             token_slice = slice(start_idx, end_idx)
             # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
-            if prompt_mapping_meta is None:
-                prompt_logits = logits_fn(prompt_hidden_states[token_slice])
-            else:
+            if prompt_mapping_meta is not None:
                 assert token_lora_indices is not None
                 with gpu_sync_allowed():
                     prompt_mapping_meta.prepare_tensors(
                         token_lora_indices[token_slice]
                     )
-                prompt_logits = logits_fn(prompt_hidden_states[token_slice])
+            prompt_logits = logits_fn(prompt_hidden_states[token_slice])
             requested_num = (
                 prompt_logits.shape[-1]
                 if num_prompt_logprobs == -1
