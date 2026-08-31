@@ -9,6 +9,7 @@ import torch
 from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
@@ -223,29 +224,51 @@ def compute_prompt_logprobs_with_chunking(
     ranks = []
     logits_mode = logprobs_mode in ("raw_logits", "processed_logits")
     prompt_token_ids = prompt_token_ids.to(torch.int64)
-    for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
-        end_idx = start_idx + CHUNK_SIZE
-        token_slice = slice(start_idx, end_idx)
-        # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
-        if lora_wrapper is None:
-            prompt_logits = logits_fn(prompt_hidden_states[token_slice])
-        else:
-            with lora_wrapper.use_token_mapping_for_logits(token_slice):
+    prompt_mapping_meta = (
+        getattr(lora_wrapper, "prompt_mapping_meta", None)
+        if lora_wrapper is not None
+        else None
+    )
+    if prompt_mapping_meta is not None:
+        assert lora_wrapper is not None
+        token_lora_indices = lora_wrapper.token_lora_indices
+        original_sampler_indices = lora_wrapper.sampler_indices.clone()
+    else:
+        token_lora_indices = None
+        original_sampler_indices = None
+    try:
+        for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
+            end_idx = start_idx + CHUNK_SIZE
+            token_slice = slice(start_idx, end_idx)
+            # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
+            if prompt_mapping_meta is None:
                 prompt_logits = logits_fn(prompt_hidden_states[token_slice])
-        requested_num = (
-            prompt_logits.shape[-1]
-            if num_prompt_logprobs == -1
-            else num_prompt_logprobs
-        )
-        result = compute_topk_scores(
-            prompt_logits,
-            requested_num,
-            prompt_token_ids[token_slice],
-            logits_mode=logits_mode,
-        )
-        token_ids.append(result.logprob_token_ids)
-        scores.append(result.logprobs)
-        ranks.append(result.selected_token_ranks)
+            else:
+                assert token_lora_indices is not None
+                with gpu_sync_allowed():
+                    prompt_mapping_meta.prepare_tensors(
+                        token_lora_indices[token_slice]
+                    )
+                prompt_logits = logits_fn(prompt_hidden_states[token_slice])
+            requested_num = (
+                prompt_logits.shape[-1]
+                if num_prompt_logprobs == -1
+                else num_prompt_logprobs
+            )
+            result = compute_topk_scores(
+                prompt_logits,
+                requested_num,
+                prompt_token_ids[token_slice],
+                logits_mode=logits_mode,
+            )
+            token_ids.append(result.logprob_token_ids)
+            scores.append(result.logprobs)
+            ranks.append(result.selected_token_ranks)
+    finally:
+        if prompt_mapping_meta is not None:
+            assert original_sampler_indices is not None
+            with gpu_sync_allowed():
+                prompt_mapping_meta.prepare_tensors(original_sampler_indices)
 
     token_ids = torch.cat(token_ids, dim=0) if len(token_ids) > 1 else token_ids[0]
     scores = torch.cat(scores, dim=0) if len(scores) > 1 else scores[0]

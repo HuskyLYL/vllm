@@ -7,8 +7,6 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import final
 
 import torch
@@ -74,7 +72,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             device=device,
             captured_lora_counts=captured_lora_counts,
         )
-        self._logits_mapping_meta: LoRAKernelMeta | None = None
 
     def update_metadata(
         self,
@@ -92,48 +89,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             # Prepare cuda kernel metadata tensors
             self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
             self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
-
-    def _get_logits_mapping_meta(self, num_tokens: int) -> "LoRAKernelMeta":
-        mapping_meta = self._logits_mapping_meta
-        if (
-            mapping_meta is None
-            or mapping_meta.token_lora_mapping.shape[0] < num_tokens
-        ):
-            mapping_meta = LoRAKernelMeta.make(
-                self.max_loras,
-                num_tokens,
-                device=self.device,
-                captured_lora_counts=self.token_mapping_meta.captured_lora_counts,
-            )
-            self._logits_mapping_meta = mapping_meta
-        return mapping_meta
-
-    @contextmanager
-    def use_token_mapping_for_logits(self, token_slice: slice) -> Iterator[None]:
-        """Use full-batch or chunk-local token metadata for LoRA logits."""
-        token_lora_indices = self.token_lora_indices
-        num_tokens = token_lora_indices.shape[0]
-        start, stop, step = token_slice.indices(num_tokens)
-        if step != 1:
-            raise ValueError("LoRA logits token slices must be contiguous")
-
-        original_mapping_meta = self.prompt_mapping_meta
-        try:
-            if start == 0 and stop == num_tokens:
-                # The logits input covers the complete forward batch, so its
-                # metadata is identical to the existing token metadata.
-                self.prompt_mapping_meta = self.token_mapping_meta
-            else:
-                # A partial chunk has local row indices and per-LoRA counts,
-                # so prepare reusable scratch metadata for just this chunk.
-                lora_indices = token_lora_indices[start:stop]
-                mapping_meta = self._get_logits_mapping_meta(lora_indices.shape[0])
-                with gpu_sync_allowed():
-                    mapping_meta.prepare_tensors(lora_indices)
-                self.prompt_mapping_meta = mapping_meta
-            yield
-        finally:
-            self.prompt_mapping_meta = original_mapping_meta
 
     def add_shrink(
         self,

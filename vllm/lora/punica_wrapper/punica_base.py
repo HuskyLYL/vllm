@@ -8,8 +8,6 @@ https://arxiv.org/abs/2310.18547
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import torch
@@ -268,22 +266,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         """
         indices_padded_len = self.indices_len[2]
         return self._sampler_indices_padded[:indices_padded_len]
-
-    def _update_logits_metadata(self, lora_indices: torch.Tensor) -> None:
-        """Update the LoRA mapping used by the logits processor."""
-        num_indices = lora_indices.shape[0]
-        self._sampler_indices[:num_indices].copy_(lora_indices)
-        self.indices_len[1] = num_indices
-
-    @contextmanager
-    def use_token_mapping_for_logits(self, token_slice: slice) -> Iterator[None]:
-        """Temporarily use token-level LoRA mapping for logits computation."""
-        sampler_indices = self.sampler_indices.clone()
-        self._update_logits_metadata(self.token_lora_indices[token_slice])
-        try:
-            yield
-        finally:
-            self._update_logits_metadata(sampler_indices)
 
     def update_metadata(
         self,
