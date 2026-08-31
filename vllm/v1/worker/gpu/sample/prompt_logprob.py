@@ -224,6 +224,7 @@ def compute_prompt_logprobs_with_chunking(
     ranks = []
     logits_mode = logprobs_mode in ("raw_logits", "processed_logits")
     prompt_token_ids = prompt_token_ids.to(torch.int64)
+    # CPU Punica wrappers do not expose prompt_mapping_meta.
     prompt_mapping_meta = (
         getattr(lora_wrapper, "prompt_mapping_meta", None)
         if lora_wrapper is not None
